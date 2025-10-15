@@ -129,9 +129,9 @@ python bakta_api_runner.py --dry-run
 **Purpose**: Extract taxonomic and structural parameters from FASTA files for Bakta annotation.
 
 **Function**: Analyzes FASTA headers to extract:
-- Genus, species, strain information
+- Genus, species information
 - Sequence circularity (for plasmid/chromosome identification)
-- Replicon table data for multi-contig genomes
+- Replicon table data
 
 **Usage**:
 ```bash
