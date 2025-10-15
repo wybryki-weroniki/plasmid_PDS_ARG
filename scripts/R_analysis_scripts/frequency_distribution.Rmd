@@ -1,0 +1,306 @@
+---
+title: "frequency_distribution"
+output: html_document
+---
+
+```{r}
+# load packages
+library(tidyverse)
+library(patchwork)
+library(here)
+
+# Load utility functions
+source(here("scripts", "R_analysis_scripts", "utils.R"))
+```
+
+
+```{r fig.phage_defence_types_v, fig.width = 8, fig.height = 12, message = FALSE, warning = FALSE}
+out_dir <- here("figures")
+out_file <- "phage_defense_types.png"
+
+ensure_dir(out_dir)
+
+## Data handling
+df <- read_metadata("metadata_updated_ecoli_systems_detail.csv") %>%
+  filter(Type == "Plasmid") %>% # <-- keep plasmids only
+  mutate(co_localised = AMRFinderPlus4_binary_presence == 1 & systems_binary_presence == 1)
+
+sys_counts <- df %>%
+  filter(!is.na(type) & type != "") %>%
+  distinct(Contig, type, co_localised) %>%
+  count(type, co_localised, name = "n") %>%
+  group_by(type) %>%
+  mutate(total = sum(n)) %>%
+  ungroup() %>%
+  mutate(
+    type = fct_reorder(type, total),
+    fill_grp = factor(if_else(co_localised, "Co-localised", "Other plasmids"),
+      levels = c("Co-localised", "Other plasmids")
+    )
+  )
+
+## Plotting
+p <- ggplot(sys_counts, aes(x = type, y = n, fill = fill_grp)) +
+  geom_col(position = position_stack(reverse = TRUE)) + # yellow near axis
+  scale_fill_manual(values = c(
+    "Co-localised" = "gold1",
+    "Other plasmids" = "blue"
+  )) +
+  coord_flip() +
+  labs(
+    title = "A. Frequency of Phage-defence System Types (plasmids only)\n(total bar length = all plasmids; yellow segment = co-localised with ARGs)",
+    x     = "Phage-defence System Type",
+    y     = "Count"
+  ) +
+  theme(
+    axis.text.y     = element_text(size = 8),
+    axis.text.x     = element_text(size = 6),
+    legend.position = "none"
+  )
+
+p
+
+ggsave(
+  filename = file.path(out_dir, out_file),
+  plot     = p,
+  width    = 8,
+  height   = 12,
+  dpi      = 300
+)
+```
+
+
+
+
+
+
+```{r fig.arg_types_v, fig.width = 8, fig.height = 12, message = FALSE, warning = FALSE}
+out_dir <- here("figures")
+out_file <- "arg_types.png"
+
+ensure_dir(out_dir)
+
+### Data handling
+
+df <- read_metadata("metadata_updated_ecoli_systems_detail.csv") %>%
+  filter(Type == "Plasmid") %>% # <-- keep plasmids only
+  mutate(co_localised = AMRFinderPlus4_binary_presence == 1 & systems_binary_presence == 1)
+
+arg_counts <- df %>%
+  select(Contig, AMRFinderPlus4, co_localised) %>%
+  separate_rows(AMRFinderPlus4, sep = ",") %>%
+  mutate(AMRFinderPlus4 = str_trim(AMRFinderPlus4)) %>%
+  filter(AMRFinderPlus4 != "") %>%
+  distinct(Contig, AMRFinderPlus4, co_localised) %>%
+  count(AMRFinderPlus4, co_localised, name = "n") %>%
+  group_by(AMRFinderPlus4) %>%
+  mutate(total = sum(n)) %>%
+  ungroup() %>%
+  mutate(
+    AMRFinderPlus4 = fct_reorder(AMRFinderPlus4, total),
+    fill_grp = factor(if_else(co_localised, "Co-localised", "Other plasmids"),
+      levels = c("Co-localised", "Other plasmids")
+    )
+  )
+
+## Plotting
+p <- ggplot(arg_counts, aes(x = AMRFinderPlus4, y = n, fill = fill_grp)) +
+  geom_col(position = position_stack(reverse = TRUE)) +
+  scale_fill_manual(values = c(
+    "Co-localised" = "gold1",
+    "Other plasmids" = "blue"
+  )) +
+  coord_flip() +
+  labs(
+    title = "B. Frequency of ARG Types (plasmids only)\n(total bar length = all plasmids; yellow segment = co-localised with phage-defence)",
+    x     = "ARG Type",
+    y     = "Count"
+  ) +
+  theme(
+    axis.text.y     = element_text(size = 7),
+    legend.position = "none"
+  )
+
+p
+
+ggsave(
+  filename = file.path(out_dir, out_file),
+  plot     = p,
+  width    = 8,
+  height   = 12,
+  dpi      = 300
+)
+```
+
+
+
+```{r plasmid_length_panels_final, fig.width = 14, fig.height = 12, message = FALSE, warning = FALSE}
+theme_set(theme_grey(base_size = 28)) # large base text
+big_title <- 40
+big_axis <- 34
+big_text <- 30
+
+make_theme <- function() {
+  theme(
+    plot.title = element_text(size = big_title, face = "bold"),
+    axis.title = element_text(size = big_axis),
+    axis.text = element_text(size = big_text),
+    legend.title = element_text(size = big_axis),
+    legend.text = element_text(size = big_text),
+    panel.grid.major = element_line(size = 0.5, colour = "grey80"),
+    panel.grid.minor = element_line(size = 0.25, colour = "grey90")
+  )
+}
+
+# Data preparation
+
+plasmids <- read_metadata("metadata_updated_ecoli_systems_detail.csv") %>%
+  filter(Type == "Plasmid") %>%
+  group_by(Contig) %>%
+  summarise(
+    Length_bp = first(Length..bp.),
+    Niche = first(Niche),
+    amr_present = max(AMRFinderPlus4_binary_presence, na.rm = TRUE),
+    sys_present = max(systems_binary_presence, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    Category = case_when(
+      amr_present == 1 & sys_present == 1 ~ "ARGs & phage-defence co-localised",
+      amr_present == 1 & sys_present == 0 ~ "ARGs only",
+      amr_present == 0 & sys_present == 1 ~ "Phage-defence only",
+      TRUE ~ "Neither present"
+    ),
+    Pathotype = if_else(Niche == "BSI", "Pathogenic", "Environmental"),
+    Category = factor(Category,
+      levels = c(
+        "Neither present",
+        "Phage-defence only",
+        "ARGs only",
+        "ARGs & phage-defence co-localised"
+      )
+    )
+  )
+
+# Colours and bin widths
+cat_cols <- c(
+  "Neither present" = "white",
+  "Phage-defence only" = "blue",
+  "ARGs only" = "yellow",
+  "ARGs & phage-defence co-localised" = "black"
+)
+bin_w_stacked <- 25000 # Panels A & B
+bin_w_detail <- 5000 # Panels C & D
+
+# helper to split 300,000 tick on two lines to help visualisation
+comma_or_split <- function(x) {
+  ifelse(x == 300000, "300,\n000", scales::comma(x))
+}
+
+# Panel A
+pA <- plasmids %>%
+  filter(Pathotype == "Pathogenic") %>%
+  ggplot(aes(Length_bp, fill = Category)) +
+  geom_histogram(
+    binwidth = bin_w_stacked,
+    position = "stack", colour = "black", size = 0.3
+  ) +
+  scale_fill_manual(values = cat_cols) +
+  scale_x_continuous(labels = scales::comma) +
+  scale_y_continuous(limits = c(0, 650)) +
+  labs(
+    title = expression("A. Pathogenic " * italic("E. coli") * " plasmid length by category"),
+    x = "Plasmid Length (bp)", y = "Count", fill = "Category"
+  ) +
+  theme(legend.position = c(0.78, 0.78)) +
+  make_theme()
+
+# Panel B
+pB <- plasmids %>%
+  filter(Pathotype == "Environmental") %>%
+  ggplot(aes(Length_bp, fill = Category)) +
+  geom_histogram(
+    binwidth = bin_w_stacked,
+    position = "stack", colour = "black", size = 0.3
+  ) +
+  scale_fill_manual(values = cat_cols) +
+  scale_x_continuous(labels = scales::comma) +
+  scale_y_continuous(limits = c(0, 650)) +
+  labs(
+    title = expression("B. Environmental " * italic("E. coli") * " plasmid length by category"),
+    x = "Plasmid Length (bp)", y = "Count", fill = "Category"
+  ) +
+  theme(legend.position = c(0.78, 0.78)) +
+  make_theme()
+
+# Panel C
+pC <- plasmids %>%
+  filter(
+    Pathotype == "Pathogenic",
+    Category == "ARGs & phage-defence co-localised"
+  ) %>%
+  ggplot(aes(Length_bp)) +
+  geom_histogram(
+    binwidth = bin_w_detail,
+    fill = "black", colour = "black", size = 0.3
+  ) +
+  scale_x_continuous(labels = scales::comma) +
+  scale_y_continuous(limits = c(0, 27)) +
+  labs(
+    title = expression("C. Pathogenic " * italic("E. coli") *
+      " plasmids with ARGs and phage-defence co-localised"),
+    x = "Plasmid Length (bp)", y = "Count"
+  ) +
+  make_theme()
+
+# Panel D
+pD <- plasmids %>%
+  filter(
+    Pathotype == "Environmental",
+    Category == "ARGs & phage-defence co-localised"
+  ) %>%
+  ggplot(aes(Length_bp)) +
+  geom_histogram(
+    binwidth = bin_w_detail,
+    fill = "black", colour = "black", size = 0.3
+  ) +
+  scale_x_continuous(labels = comma_or_split) +
+  scale_y_continuous(limits = c(0, 27)) +
+  labs(
+    title = expression("D. Environmental " * italic("E. coli") *
+      " plasmids with ARGs and phage-defence co-localised"),
+    x = "Plasmid Length (bp)", y = "Count"
+  ) +
+  make_theme()
+
+# Assemble & display
+final_plot <- (pA | pB) / (pC | pD)
+final_plot
+
+# Saving
+out_dir <- here("figures")
+ensure_dir(out_dir)
+
+ggsave(
+  file.path(out_dir, "plasmid_length_panels_largeFont.png"),
+  plot   = final_plot,
+  width  = 45, # inches
+  height = 30, # inches
+  dpi    = 300
+)
+```
+
+# Session Information
+
+```{r session-info}
+sessionInfo()
+```
+
+
+
+
+
+
+
+
+

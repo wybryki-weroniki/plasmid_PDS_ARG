@@ -1,0 +1,64 @@
+---
+title: "sampling_plasmids_from_clusters"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+# Load required packages
+library(tidyverse)
+library(here)
+
+# Load utility functions
+source(here("scripts", "R_analysis_scripts", "utils.R"))
+
+set.seed(1)
+```
+
+
+```{r}
+# Read file
+
+metadata_ecoli_plasmids <- read_metadata("metadata_updated_ecoli_plasmid.csv")
+```
+
+
+```{r}
+# Sub-sample one plasmid per cluster, and then one per remaining identical groups, at random
+
+metadata_sampled_clusters <- metadata_ecoli_plasmids %>%
+  group_by(Cluster.name) %>%
+  filter(!is.na(Cluster.name)) %>%
+  sample_n(1) %>%
+  bind_rows(filter(metadata_ecoli_plasmids, is.na(Cluster.name))) %>%
+  ungroup()
+
+metadata_sampled_clusters <- metadata_sampled_clusters %>%
+  group_by(Identical.group.name) %>%
+  filter(!is.na(Identical.group.name)) %>%
+  sample_n(1) %>%
+  bind_rows(filter(metadata_sampled_clusters, is.na(Identical.group.name))) %>%
+  ungroup()
+```
+
+
+```{r}
+# Save csv for downstream processing
+
+write.csv(
+  metadata_sampled_clusters,
+  here("assemblies", "metadata_sampled_clusters.csv"),
+  row.names = FALSE
+)
+```
+
+# Session Information
+
+```{r session-info}
+sessionInfo()
+```
+
+

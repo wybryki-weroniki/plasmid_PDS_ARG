@@ -1,0 +1,316 @@
+---
+title: "plasmids_vs_chromosomes_ARGs_PDSs_enrichment"
+output: html_document
+---
+
+```{r}
+# Loading packages
+library(ggplot2)
+library(ggsignif)
+library(patchwork)
+library(tidyverse)
+library(here)
+
+# Load utility functions
+source(here("scripts", "R_analysis_scripts", "utils.R"))
+```
+
+
+```{r}
+#  Figure 1: Plasmid‐share of gene counts, systems_gene counts, AMR counts
+
+
+# input
+df <- as.data.frame(read_metadata("metadata_updated_ecoli.csv"))
+
+# calculate totals and proportions
+total_genes <- sum(df$gene_count, na.rm = TRUE)
+plasmid_genes <- sum(df$gene_count[df$Type == "Plasmid"], na.rm = TRUE)
+prop_genes_plasmid <- plasmid_genes / total_genes * 100
+
+total_sysgenes <- sum(df$systems_gene_count, na.rm = TRUE)
+plasmid_sysgenes <- sum(df$systems_gene_count[df$Type == "Plasmid"], na.rm = TRUE)
+prop_sysgenes_plasmid <- plasmid_sysgenes / total_sysgenes * 100
+
+total_amr <- sum(df$AMRFinderPlus4_count, na.rm = TRUE)
+plasmid_amr <- sum(df$AMRFinderPlus4_count[df$Type == "Plasmid"], na.rm = TRUE)
+prop_amr_plasmid <- plasmid_amr / total_amr * 100
+
+#  chi-square tests and star codes
+chi_1_2 <- chisq.test(matrix(
+  c(
+    plasmid_genes, total_genes - plasmid_genes,
+    plasmid_sysgenes, total_sysgenes - plasmid_sysgenes
+  ),
+  nrow = 2, byrow = TRUE
+), correct = TRUE)
+
+chi_1_3 <- chisq.test(matrix(
+  c(
+    plasmid_genes, total_genes - plasmid_genes,
+    plasmid_amr, total_amr - plasmid_amr
+  ),
+  nrow = 2, byrow = TRUE
+), correct = TRUE)
+
+# Use star() function from utils.R
+stars1 <- star(chi_1_2$p.value)
+stars2 <- star(chi_1_3$p.value)
+
+#  build dataframe
+plot_df <- data.frame(
+  label = c(
+    "A. Total gene count",
+    "B. Defense systems gene count",
+    "C. ARG count"
+  ),
+  proportion = c(
+    prop_genes_plasmid,
+    prop_sysgenes_plasmid,
+    prop_amr_plasmid
+  ),
+  sample_size = c(
+    total_genes,
+    total_sysgenes,
+    total_amr
+  ),
+  stringsAsFactors = FALSE
+)
+
+# format sample‐size for labeling
+plot_df$sample_label <- formatC(plot_df$sample_size, format = "d", big.mark = ",")
+
+# label text for every bar
+plot_df$label_text <- paste0(
+  sprintf("%.2f%%", plot_df$proportion),
+  "\n(n=", plot_df$sample_label, ")"
+)
+
+#  determine y-positions
+h1 <- max(plot_df$proportion[1:2]) + 15 # for A vs B
+h2 <- max(plot_df$proportion[c(1, 3)]) + 10 # for A vs C
+y_pos <- c(h1, h2)
+
+inside_thresh <- max(plot_df$proportion) * 0.5
+
+# create and save plot
+p <- ggplot(plot_df, aes(x = label, y = proportion)) +
+  geom_bar(stat = "identity", fill = "skyblue", width = 0.7) +
+
+  # inside‐bar labels for tall bars
+  geom_text(
+    data = subset(plot_df, proportion > inside_thresh),
+    aes(y = proportion / 2, label = label_text),
+    vjust = 0.5, size = 4
+  ) +
+
+  # above‐bar labels for the others
+  geom_text(
+    data = subset(plot_df, proportion <= inside_thresh),
+    aes(y = proportion, label = label_text),
+    vjust = -0.4, size = 4
+  ) +
+
+  # significance brackets & stars
+  geom_signif(
+    comparisons = list(
+      c("A. Total gene count", "B. Defense systems gene count"),
+      c("A. Total gene count", "C. ARG count")
+    ),
+    annotations = c(stars1, stars2),
+    y_position = y_pos,
+    tip_length = 0.02,
+    textsize = 4
+  ) +
+
+  # title with italic “E. coli”
+  labs(
+    title = expression(
+      "Phage-defense genes and ARGs are enriched on plasmids in " *
+        italic("E. coli")
+    ),
+    y = "Proportion on plasmids (%)",
+    x = ""
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(size = 12, vjust = 0.5),
+    plot.title  = element_text(hjust = 0.5, size = 14)
+  )
+
+print(p)
+
+ggsave(
+  filename = "plasmid_share_of_gene_systems_amr.png",
+  plot = p,
+  width = 8, height = 6,
+  units = "in",
+  dpi = 300
+)
+
+# results visualisation
+print(plot_df[, c("label", "proportion")])
+cat("\nChi-sq A vs B:\n")
+print(chi_1_2)
+cat("\nChi-sq A vs C:\n")
+print(chi_1_3)
+```
+
+
+
+```{r}
+#  Supplementary Figure S5: Plasmid-share of gene counts, systems_gene counts, AMR counts; subsets per niche
+
+
+# input data
+df <- as.data.frame(read_metadata("metadata_updated_ecoli.csv"))
+
+
+# function to build one plot from a subset
+make_plot <- function(data, subtitle) {
+  # totals and proportions
+  total_genes <- sum(data$gene_count, na.rm = TRUE)
+  plasmid_genes <- sum(data$gene_count[data$Type == "Plasmid"], na.rm = TRUE)
+  prop_genes_plasmid <- plasmid_genes / total_genes * 100
+
+  total_sysgenes <- sum(data$systems_gene_count, na.rm = TRUE)
+  plasmid_sysgenes <- sum(data$systems_gene_count[data$Type == "Plasmid"], na.rm = TRUE)
+  prop_sysgenes_plasmid <- plasmid_sysgenes / total_sysgenes * 100
+
+  total_amr <- sum(data$AMRFinderPlus4_count, na.rm = TRUE)
+  plasmid_amr <- sum(data$AMRFinderPlus4_count[data$Type == "Plasmid"], na.rm = TRUE)
+  prop_amr_plasmid <- plasmid_amr / total_amr * 100
+
+  #  tests
+  chi_1_2 <- chisq.test(
+    matrix(
+      c(
+        plasmid_genes, total_genes - plasmid_genes,
+        plasmid_sysgenes, total_sysgenes - plasmid_sysgenes
+      ),
+      nrow = 2, byrow = TRUE
+    ),
+    correct = TRUE
+  )
+  chi_1_3 <- chisq.test(
+    matrix(
+      c(
+        plasmid_genes, total_genes - plasmid_genes,
+        plasmid_amr, total_amr - plasmid_amr
+      ),
+      nrow = 2, byrow = TRUE
+    ),
+    correct = TRUE
+  )
+  stars1 <- star(chi_1_2$p.value)
+  stars2 <- star(chi_1_3$p.value)
+
+  #  data frame for ggplot
+  plot_df <- data.frame(
+    label = c(
+      "A. Total gene count",
+      "B. Defense systems gene count",
+      "C. ARG count"
+    ),
+    proportion = c(
+      prop_genes_plasmid,
+      prop_sysgenes_plasmid,
+      prop_amr_plasmid
+    ),
+    sample_size = c(
+      total_genes,
+      total_sysgenes,
+      total_amr
+    ),
+    stringsAsFactors = FALSE
+  )
+  plot_df$sample_label <- formatC(plot_df$sample_size, format = "d", big.mark = ",")
+  plot_df$label_text <- paste0(
+    sprintf("%.2f%%", plot_df$proportion),
+    "\n(n=", plot_df$sample_label, ")"
+  )
+
+  #  significance bracket heights
+  h1 <- max(plot_df$proportion[1:2]) + 15
+  h2 <- max(plot_df$proportion[c(1, 3)]) + 10
+  inside_thresh <- max(plot_df$proportion) * 0.5
+
+  #  build plot
+  ggplot(plot_df, aes(x = label, y = proportion)) +
+    geom_bar(stat = "identity", fill = "skyblue", width = 0.7) +
+    geom_text(
+      data = subset(plot_df, proportion > inside_thresh),
+      aes(y = proportion / 2, label = label_text),
+      vjust = 0.5, size = 4
+    ) +
+    geom_text(
+      data = subset(plot_df, proportion <= inside_thresh),
+      aes(y = proportion, label = label_text),
+      vjust = -0.4, size = 4
+    ) +
+    geom_signif(
+      comparisons = list(
+        c("A. Total gene count", "B. Defense systems gene count"),
+        c("A. Total gene count", "C. ARG count")
+      ),
+      annotations = c(stars1, stars2),
+      y_position = c(h1, h2),
+      tip_length = 0.02,
+      textsize = 4
+    ) +
+    labs(
+      title = " ",
+      subtitle = subtitle,
+      y = "Proportion on plasmids (%)",
+      x = NULL
+    ) +
+    theme_minimal() +
+    theme(
+      axis.text.x   = element_text(size = 12, vjust = 0.5),
+      plot.title    = element_text(hjust = 0.5, size = 14),
+      plot.subtitle = element_text(hjust = 0.5, size = 12, face = "italic")
+    )
+}
+
+# defining subsets
+g1 <- df[df$REHAB.sample == "NA" | is.na(df$REHAB.sample), ]
+g2 <- subset(df, REHAB.sample == "Pig")
+g3 <- subset(df, REHAB.sample %in% c("Didcot", "Wantage", "Watlington", "Witney", "Oxford"))
+g4 <- subset(df, REHAB.sample %in% c("Cattle", "Poultry", "Sheep"))
+
+# building plots
+p1 <- make_plot(g1, "Bloodstream infection isolates (BSI)")
+p2 <- make_plot(g2, "REHAB location = Pig farms")
+p3 <- make_plot(g3, "REHAB location = wastewater plants Didcot ∪ Wantage ∪ Watlington ∪ Witney ∪ Oxford")
+p4 <- make_plot(g4, "REHAB location = Cattle ∪ Poultry ∪ Sheep farms")
+
+# combining into one panel (2 × 2)
+combined_plot <- (p1 | p2) /
+  (p3 | p4)
+
+print(combined_plot)
+
+# save figure
+output_dir <- here("figures")
+ensure_dir(output_dir)
+output_path <- file.path(
+  output_dir,
+  "plasmid_share_of_gene_systems_amr_by_REHAB.png"
+)
+
+ggsave(
+  filename = output_path,
+  plot = combined_plot,
+  width = 14, height = 10,
+  units = "in",
+  dpi = 300
+)
+```
+
+# Session Information
+
+```{r session-info}
+sessionInfo()
+```
+
+

@@ -1,0 +1,347 @@
+---
+title: "gamm_ARG_PDS"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Loading required packages
+
+```{r}
+library(dplyr)
+library(mgcv)
+library(broom)
+library(ggplot2)
+library(scales)
+library(ggtext)
+library(tidyverse)
+library(rstatix)
+library(DHARMa)
+library(forcats)
+library(gplots)
+library(here)
+
+# Load utility functions
+source(here("scripts", "R_analysis_scripts", "utils.R"))
+```
+
+
+```{r load-data, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+# Load metadata for sampled clusters
+metadata_sampled_clusters <- read_metadata("metadata_sampled_clusters.csv")
+metadata_sampled_clusters
+```
+
+
+```{r, include=FALSE}
+# Set seed for reproducibility
+set.seed(123) # 
+```
+
+# Raw data processing
+
+```{r}
+# Ensuring that PlasmidFinder NA values will also be included in the model
+
+metadata_sampled_clusters <- metadata_sampled_clusters %>%
+  mutate(
+    Abricate.PlasmidFinder =
+      fct_na_value_to_level(Abricate.PlasmidFinder, level = "Unknown")
+  )
+```
+
+
+
+```{r}
+metadata_sampled_clusters <-
+  metadata_sampled_clusters %>%
+  mutate(
+    # numeric/continuous variables
+    AMR_count = as.integer(AMRFinderPlus4_count),
+    systems_count = as.integer(systems_count),
+    `GC....` = as.numeric(`GC....`),
+    `Length..bp.` = as.numeric(`Length..bp.`),
+
+    # categorical variables
+    MOB.typer.mobility = as.factor(MOB.typer.mobility),
+    Niche = factor(Niche,
+      levels = c(
+        "Livestock-associated",
+        "BSI",
+        "WwTW-associated"
+      )
+    ),
+    Abricate.PlasmidFinder = as.factor(Abricate.PlasmidFinder)
+  ) %>%
+  # centre GC so that 0 = mean(GC)
+  mutate(
+    GC_mean      = mean(`GC....`, na.rm = TRUE), # save the mean (for reporting)
+    GC_centered  = `GC....` - GC_mean # mean-centred version used in the model
+  )
+```
+
+# GAMM fitting
+
+```{r}
+# Generalised additive model (Tweedie, log link)
+gamm_model <- gam(
+  AMR_count ~
+    systems_count +
+    GC_centered + # centred GC predictor
+    offset(log10(`Length..bp.`)) +
+    Niche + # reference = "Livestock-associated"
+    s(Abricate.PlasmidFinder, bs = "re"),
+  family = tw(link = "log"),
+  data = metadata_sampled_clusters
+)
+
+# Model inspection
+summary(gamm_model)
+AIC(gamm_model)
+
+
+# DHARMa for Tweedie
+sim_twp <- DHARMa::simulateResiduals(gamm_model)
+DHARMa::plotSimulatedResiduals(sim_twp)
+DHARMa::testDispersion(sim_twp)
+```
+
+
+
+# Forest plot visualisation
+
+
+
+```{r}
+# Figure 3B
+
+# Forest-plot of gamm_model
+
+# Tidying coefficients & exponentiate (to fold-changes)
+coef_df <- tidy(gamm_model, parametric = TRUE, conf.int = TRUE) %>%
+  filter(term != "(Intercept)") %>%
+  mutate(across(c(estimate, conf.low, conf.high), exp)) # exp
+
+# Adding the “reference” row (fold-change = 1)
+ref_lvl <- levels(model.frame(gamm_model)$Niche)[1] # "Livestock-associated"
+coef_df <- bind_rows(
+  tibble(
+    term      = paste0("Niche", ref_lvl, " (reference)"),
+    estimate  = 1,
+    conf.low  = 1,
+    conf.high = 1
+  ),
+  coef_df
+)
+
+# Adding labels & desired plotting order
+coef_df <- coef_df %>%
+  mutate(
+    label = case_when(
+      term == "systems_count" ~ "Phage-defense systems count",
+      term == "GC_centered" ~ "GC content (mean-centred)",
+      term == paste0("Niche", ref_lvl, " (reference)")
+      ~ "Niche: Livestock-associated (reference)",
+      term == "NicheWwTW-associated" ~ "Niche: Wastewater",
+      term == "NicheBSI" ~ "Niche: Bloodstream infections",
+      TRUE ~ term
+    )
+  )
+
+desired_order <- c(
+  "Phage-defense systems count",
+  "GC content (mean-centred)",
+  "Niche: Livestock-associated (reference)",
+  "Niche: Wastewater",
+  "Niche: Bloodstream infections"
+)
+
+coef_df <- coef_df %>%
+  mutate(label = factor(label, levels = rev(desired_order)))
+
+# Highlighting the phage-defense row & building markdown labels
+coef_df <- coef_df %>%
+  mutate(highlight = (label == "Phage-defense systems count"))
+
+lab_vec <- levels(coef_df$label)
+lab_out <- ifelse(
+  lab_vec == "Phage-defense systems count",
+  "<span style='color:blue2;font-weight:bold'>Phage-defense systems count</span>",
+  lab_vec
+)
+
+# Building the plot (linear x-axis)
+pA <- ggplot(coef_df, aes(x = estimate, y = label, colour = highlight)) +
+  geom_vline(xintercept = 1, linetype = "dashed") +
+  geom_errorbarh(aes(xmin = conf.low, xmax = conf.high), height = 0.2) +
+  geom_point(size = 3) +
+  scale_colour_manual(values = c(`TRUE` = "blue2", `FALSE` = "black"), guide = "none") +
+  scale_x_continuous(
+    breaks = c(0.5, 1, 1.5, 2, 4), # linear axis with extra ticks
+    labels = number_format(accuracy = 0.1)
+  ) +
+  scale_y_discrete(labels = lab_out) +
+  labs(
+    title = "B. Generalised additive model predictor effects on ARG count\n(fold-change)",
+    x     = "Fold-change (95 % CI) in ARG count",
+    y     = NULL
+  ) +
+  theme_classic(base_size = 14) +
+  theme(
+    panel.grid.major = element_line(colour = "grey85", size = 0.2),
+    panel.grid.minor.x = element_line(colour = "grey90", size = 0.1),
+    axis.text.x = element_text(size = 13),
+    axis.text.y = element_markdown(size = 13),
+    axis.title.x = element_text(size = 15, face = "bold"),
+    axis.title.y = element_text(size = 15, face = "bold"),
+    plot.title = element_text(size = 16, face = "bold", hjust = 0.5)
+  )
+```
+
+```{r}
+# Figure 3B alternative with log10-scaled x-axis
+
+# Forest-plot of gamm_model
+
+# Tidying coefficients & exponentiate (to fold-changes)
+coef_df <- tidy(gamm_model, parametric = TRUE, conf.int = TRUE) %>%
+  filter(term != "(Intercept)") %>%
+  mutate(across(c(estimate, conf.low, conf.high), exp)) # exp
+
+# Adding the “reference” row (fold-change = 1)
+ref_lvl <- levels(model.frame(gamm_model)$Niche)[1] # "Livestock-associated"
+coef_df <- bind_rows(
+  tibble(
+    term      = paste0("Niche", ref_lvl, " (reference)"),
+    estimate  = 1,
+    conf.low  = 1,
+    conf.high = 1
+  ),
+  coef_df
+)
+
+# Adding labels & desired plotting order
+coef_df <- coef_df %>%
+  mutate(
+    label = case_when(
+      term == "systems_count" ~ "Phage-defense systems count",
+      term == "GC_centered" ~ "GC content (mean-centred)",
+      term == paste0("Niche", ref_lvl, " (reference)")
+      ~ "Niche: Livestock-associated (reference)",
+      term == "NicheWwTW-associated" ~ "Niche: Wastewater",
+      term == "NicheBSI" ~ "Niche: Bloodstream infections",
+      TRUE ~ term
+    )
+  )
+
+desired_order <- c(
+  "Phage-defense systems count",
+  "GC content (mean-centred)",
+  "Niche: Livestock-associated (reference)",
+  "Niche: Wastewater",
+  "Niche: Bloodstream infections"
+)
+
+coef_df <- coef_df %>%
+  mutate(label = factor(label, levels = rev(desired_order)))
+
+# Highlighting the phage-defense row & building markdown labels
+coef_df <- coef_df %>%
+  mutate(highlight = (label == "Phage-defense systems count"))
+
+lab_vec <- levels(coef_df$label)
+lab_out <- ifelse(
+  lab_vec == "Phage-defense systems count",
+  "<span style='color:blue2;font-weight:bold'>Phage-defense systems count</span>",
+  lab_vec
+)
+
+# Building the plot (linear x-axis)
+pA <- ggplot(coef_df, aes(x = estimate, y = label, colour = highlight)) +
+  geom_vline(xintercept = 1, linetype = "dashed") +
+  geom_errorbarh(aes(xmin = conf.low, xmax = conf.high), height = 0.2) +
+  geom_point(size = 3) +
+  scale_colour_manual(values = c(`TRUE` = "blue2", `FALSE` = "black"), guide = "none") +
+  scale_x_log10(
+    breaks = c(0.5, 1, 1.5, 2, 4), # linear axis with extra ticks
+    labels = number_format(accuracy = 0.1)
+  ) +
+  scale_y_discrete(labels = lab_out) +
+  labs(
+    title = "B. Generalised additive model predictor effects on ARG count\n(fold-change)",
+    x     = "Fold-change (95 % CI) in ARG count",
+    y     = NULL
+  ) +
+  theme_classic(base_size = 14) +
+  theme(
+    panel.grid.major = element_line(colour = "grey85", size = 0.2),
+    panel.grid.minor.x = element_line(colour = "grey90", size = 0.1),
+    axis.text.x = element_text(size = 13),
+    axis.text.y = element_markdown(size = 13),
+    axis.title.x = element_text(size = 15, face = "bold"),
+    axis.title.y = element_text(size = 15, face = "bold"),
+    plot.title = element_text(size = 16, face = "bold", hjust = 0.5)
+  )
+```
+
+
+
+
+
+```{r}
+# Table 1
+
+# packages
+library(broom) 
+library(dplyr)
+library(gt)
+library(scales)
+
+# pull parametric terms from the GAMM and compute CIs + exponentiated effects
+tab <- tidy(gamm_model, parametric = TRUE) %>% # intercept + fixed effects
+  mutate(
+    # 95% CI on the link (log) scale
+    conf.low = estimate - 1.96 * std.error,
+    conf.high = estimate + 1.96 * std.error,
+    # exponentiated effects (for a log link these are rate ratios)
+    effect = exp(estimate),
+    effect.low = exp(conf.low),
+    effect.high = exp(conf.high)
+  ) %>%
+  # rename rows
+  mutate(Covariate = case_when(
+    term == "(Intercept)" ~ "(Intercept)",
+    term == "systems_count" ~ "PDS count",
+    term == "GC_centered" ~ "Plasmid GC content (mean-centred)",
+    grepl("^Niche", term) & grepl("BSI", term) ~ "Niche\nBSI-associated",
+    grepl("^Niche", term) & !grepl("BSI", term) ~ "Niche\nWastewater-associated",
+    TRUE ~ term
+  )) %>%
+  mutate(
+    coef_ci = sprintf("%.2f (%.2f, %.2f)", estimate, conf.low, conf.high),
+    eff_ci  = sprintf("%.2f (%.2f, %.2f)", effect, effect.low, effect.high),
+    pval    = pvalue(p.value, accuracy = 0.001)
+  ) %>%
+  select(Covariate,
+    `Coefficient (95% CI)` = coef_ci,
+    `Rate ratio (95% CI)` = eff_ci, # Or “Odds ratio”
+    `p-value` = pval
+  )
+
+# render as a table
+gt(tab) %>%
+  tab_options(table.font.size = px(12)) %>%
+  tab_source_note(
+    "Parameter estimates for the GAMM (Tweedie, log link). For Niche, the reference level is Livestock-associated.
+     Rate ratios were obtained by exponentiating coefficients."
+  )
+```
+
+# Session Information
+
+```{r session-info}
+sessionInfo()
+```

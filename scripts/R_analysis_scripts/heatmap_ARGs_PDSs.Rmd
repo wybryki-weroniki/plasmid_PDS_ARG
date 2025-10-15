@@ -1,0 +1,202 @@
+---
+title: "heatmap_ARGs_PDSs"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r, include=FALSE}
+# Load packages, set seed for reproducibility
+library(tidyverse) # for readr, dplyr, tidyr, stringr, ggplot2
+library(gplots) # for colorpanel()
+library(here)
+
+# Load utility functions
+source(here("scripts", "R_analysis_scripts", "utils.R"))
+
+set.seed(123)
+```
+
+# Heatmap
+
+```{r, include=FALSE}
+# Reading the metadata
+meta <- read_metadata("metadata_updated_ecoli_systems_detail.csv")
+```
+
+
+```{r}
+# Figure 3A
+
+# Keep only plasmid entries
+plasmids <- meta %>%
+  filter(Type == "Plasmid")
+
+# Split the AMRFinderPlus4 column on commas
+plasmids_long <- plasmids %>%
+  mutate(AMRFinderPlus4 = coalesce(AMRFinderPlus4, "")) %>%
+  separate_rows(AMRFinderPlus4, sep = ",") %>%
+  mutate(AMRFinderPlus4 = str_trim(AMRFinderPlus4)) %>%
+  filter(AMRFinderPlus4 != "", !is.na(type))
+
+# Build the co-occurrence matrix (ARG × PDS)
+co_mat <- table(plasmids_long$AMRFinderPlus4, plasmids_long$type)
+
+# Remove genes/systems that never co-occur
+co_mat <- co_mat[rowSums(co_mat) > 0, colSums(co_mat) > 0]
+
+# Convert to long format and compute totals
+co_df <- as.data.frame(as.table(co_mat), stringsAsFactors = FALSE)
+colnames(co_df) <- c("gene", "system", "count")
+
+gene_totals <- co_df %>%
+  group_by(gene) %>%
+  summarise(total = sum(count))
+system_totals <- co_df %>%
+  group_by(system) %>%
+  summarise(total = sum(count))
+
+gene_levels <- gene_totals %>%
+  arrange(desc(total)) %>%
+  pull(gene)
+system_levels <- system_totals %>%
+  arrange(total) %>%
+  pull(system)
+
+co_df <- co_df %>%
+  mutate(
+    gene   = factor(gene, levels = gene_levels),
+    system = factor(system, levels = system_levels)
+  )
+
+# Build colour palette
+pal <- c("white", colorpanel(10000, "yellow2", "darkcyan", "purple4"))
+
+# Draw the heatmap with ggplot2
+pB <- ggplot(co_df, aes(x = gene, y = system, fill = count)) +
+  geom_tile(color = "white") +
+  scale_fill_gradientn(
+    colours = pal,
+    name    = "Number of shared plasmids"
+  ) +
+  labs(
+    x     = "Antibiotic resistance genes",
+    y     = "Phage defense systems",
+    title = "A. Co-occurrence on all plasmids\n(ordered by total counts)"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    plot.title = element_text(size = 16, face = "bold", hjust = 0.5),
+    axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1),
+    axis.text.y = element_text(hjust = 1),
+    axis.title.y = element_text(margin = margin(r = 0), face = "bold"),
+    axis.title.x = element_text(margin = margin(t = 10), face = "bold"),
+    legend.position = "bottom"
+  )
+
+print(pB)
+
+# Save the plot to figures directory
+ggsave(
+  filename = here("figures", "cooccurrence_heatmap_plasmids.png"),
+  plot     = pB,
+  width    = 12,
+  height   = 15,
+  units    = "in",
+  dpi      = 300
+)
+
+```
+
+
+
+
+```{r}
+# Supplementary Figure S9
+
+# Keep only chromosome entries
+chromosomes <- meta %>%
+  filter(Type == "Chromosome")
+
+# Split the AMRFinderPlus4 column on commas
+chromosomes_long <- chromosomes %>%
+  mutate(AMRFinderPlus4 = coalesce(AMRFinderPlus4, "")) %>%
+  separate_rows(AMRFinderPlus4, sep = ",") %>%
+  mutate(AMRFinderPlus4 = str_trim(AMRFinderPlus4)) %>%
+  filter(AMRFinderPlus4 != "", !is.na(type))
+
+# Build the co-occurrence matrix (ARG × PDS)
+co_mat <- table(chromosomes_long$AMRFinderPlus4, chromosomes_long$type)
+
+# Remove genes/systems that never co-occur
+co_mat <- co_mat[rowSums(co_mat) > 0, colSums(co_mat) > 0]
+
+# Convert to long format and compute totals
+co_df <- as.data.frame(as.table(co_mat), stringsAsFactors = FALSE)
+colnames(co_df) <- c("gene", "system", "count")
+
+gene_totals <- co_df %>%
+  group_by(gene) %>%
+  summarise(total = sum(count))
+system_totals <- co_df %>%
+  group_by(system) %>%
+  summarise(total = sum(count))
+
+gene_levels <- gene_totals %>%
+  arrange(desc(total)) %>%
+  pull(gene)
+system_levels <- system_totals %>%
+  arrange(total) %>%
+  pull(system)
+
+co_df <- co_df %>%
+  mutate(
+    gene   = factor(gene, levels = gene_levels),
+    system = factor(system, levels = system_levels)
+  )
+
+# Build colour palette
+pal <- c("white", colorpanel(10000, "yellow2", "darkcyan", "purple4"))
+
+# Draw the heatmap with ggplot2
+p <- ggplot(co_df, aes(x = gene, y = system, fill = count)) +
+  geom_tile(color = "white") +
+  scale_fill_gradientn(
+    colours = pal,
+    name    = "Number of shared chromosomes"
+  ) +
+  labs(
+    x     = "Antibiotic resistance genes",
+    y     = "Phage defence systems",
+    title = "Co-occurrence on all chromosomes\n(ordered by total counts)"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title    = element_text(hjust = 0.5),
+    axis.text.x   = element_text(angle = 90, vjust = 0.5, hjust = 1),
+    axis.text.y   = element_text(hjust = 1),
+    axis.title.y  = element_text(margin = margin(r = 10)),
+    axis.title.x  = element_text(margin = margin(t = 10))
+  )
+
+print(p)
+
+# Save the plot to figures directory
+ggsave(
+  filename = here("figures", "cooccurrence_heatmap_chromosomes.png"),
+  plot     = p,
+  width    = 12,
+  height   = 15,
+  units    = "in",
+  dpi      = 300
+)
+```
+
+# Session Information
+
+```{r session-info}
+sessionInfo()
+```
