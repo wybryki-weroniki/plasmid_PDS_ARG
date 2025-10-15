@@ -1,4 +1,4 @@
-# Antibiotic resistance gens and phage defense systems analysis scripts
+# Antibiotic resistance genes and phage defense systems analysis scripts
 
 This repository contains all scripts required to reproduce the analysis from manuscript 'Plasmids link antibiotic resistance genes and phage defense systems in E. coli'.
 
