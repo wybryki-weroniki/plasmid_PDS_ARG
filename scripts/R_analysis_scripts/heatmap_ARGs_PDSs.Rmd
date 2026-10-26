@@ -10,9 +10,14 @@ knitr::opts_chunk$set(echo = TRUE)
 
 ```{r, include=FALSE}
 # Load packages, set seed for reproducibility
-library(tidyverse) # for readr, dplyr, tidyr, stringr, ggplot2
-library(gplots) # for colorpanel()
+library(tidyverse)
+library(gplots)
 library(here)
+library(ggtext)
+library(glue)
+library(ggnewscale)
+library(scales)
+library(grid)
 
 # Load utility functions
 source(here("scripts", "R_analysis_scripts", "utils.R"))
@@ -23,179 +28,327 @@ set.seed(123)
 # Heatmap
 
 ```{r, include=FALSE}
-# Reading the metadata
-meta <- read_metadata("metadata_updated_ecoli_systems_detail.csv")
+# Reading metadata & defense-system classification (in assemblies/)
+meta <- read_metadata("metadata_updated_ecoli_systems_detail2.csv")
+
+annotations <- read_metadata("classification_final.csv") %>%
+  rename_with(str_trim) %>%
+  mutate(system = str_trim(system)) %>%
+  distinct(system, mechanism_category, mechanism_subcategory)
+
+# Output directory for figures
+fig_dir <- here("figures")
+ensure_dir(fig_dir)
 ```
 
+```{r}
+# Okabe-Ito based colour-blind friendly palette for defense mechanisms
+mechanism_colours <- c(
+  "Abi/Cell Death"         = "#D55E00",
+  "Nucleic Acid Targeting" = "#0072B2",
+  "Other/Mixed"            = "#009E73",
+  "DNA/RNA Modification"   = "#F0E442",
+  "Uncharacterized"        = "#999999"
+)
+
+mechanism_levels <- names(mechanism_colours)
+```
+
+# 2. Prepare co-occurrence data (function)
+
+Denominator = all unique contigs (plasmids/chromosomes) carrying a given ARG class
+Numerator   = unique contigs carrying both a given PDS and a given ARG
 
 ```{r}
-# Figure 3A
 
-# Keep only plasmid entries
-plasmids <- meta %>%
-  filter(Type == "Plasmid")
+prepare_cooccurrence <- function(meta, contig_type) {
 
-# Split the AMRFinderPlus4 column on commas
-plasmids_long <- plasmids %>%
-  mutate(AMRFinderPlus4 = coalesce(AMRFinderPlus4, "")) %>%
-  separate_rows(AMRFinderPlus4, sep = ",") %>%
-  mutate(AMRFinderPlus4 = str_trim(AMRFinderPlus4)) %>%
-  filter(AMRFinderPlus4 != "", !is.na(type))
+  n_col <- paste0("n_", tolower(contig_type), "s_with_class")   # e.g. n_plasmids_with_class
 
-# Build the co-occurrence matrix (ARG × PDS)
-co_mat <- table(plasmids_long$AMRFinderPlus4, plasmids_long$type)
+  #2.1. AMR-class table for denominators
+  amr_class_totals <- meta %>%
+    filter(Type == contig_type) %>%
+    mutate(
+      contig_uid           = str_trim(Contig),
+      AMRFinderPlus4       = str_trim(AMRFinderPlus4),
+      AMRFinderPlus4_Class = str_trim(AMRFinderPlus4_Class),
+      AMRFinderPlus4       = na_if(AMRFinderPlus4, ""),
+      AMRFinderPlus4_Class = na_if(AMRFinderPlus4_Class, "")
+    ) %>%
+    filter(!is.na(AMRFinderPlus4)) %>%
+    mutate(arg_class = replace_na(AMRFinderPlus4_Class, "Unclassified")) %>%
+    distinct(contig_uid, arg_class) %>%
+    count(arg_class, name = n_col)
 
-# Remove genes/systems that never co-occur
-co_mat <- co_mat[rowSums(co_mat) > 0, colSums(co_mat) > 0]
+# 2.2. Build contigs_long for system x ARG class co-occurrence
+  contigs_long <- meta %>%
+    filter(Type == contig_type) %>%
+    mutate(
+      contig_uid           = str_trim(Contig),
+      system               = str_trim(type),
+      AMRFinderPlus4       = str_trim(AMRFinderPlus4),
+      AMRFinderPlus4_Class = str_trim(AMRFinderPlus4_Class),
+      AMRFinderPlus4       = na_if(AMRFinderPlus4, ""),
+      AMRFinderPlus4_Class = na_if(AMRFinderPlus4_Class, ""),
+      system               = na_if(system, "")
+    ) %>%
+    filter(!is.na(AMRFinderPlus4), !is.na(system)) %>%
+    distinct(contig_uid, system, AMRFinderPlus4, AMRFinderPlus4_Class)
 
-# Convert to long format and compute totals
-co_df <- as.data.frame(as.table(co_mat), stringsAsFactors = FALSE)
-colnames(co_df) <- c("gene", "system", "count")
+  #2.3. Collapse to ARG class level
+  class_co_df <- contigs_long %>%
+    mutate(arg_class = replace_na(AMRFinderPlus4_Class, "Unclassified")) %>%
+    distinct(contig_uid, system, arg_class) %>%
+    count(system, arg_class, name = "count") %>%
+    left_join(amr_class_totals, by = "arg_class") %>%
+    filter(!is.na(.data[[n_col]]), .data[[n_col]] > 0, count > 0) %>%
+    mutate(
+      pct = count / .data[[n_col]],
+      pct_label = case_when(
+        pct > 0 & pct < 0.001 ~ "<0.1%",
+        TRUE ~ percent(pct, accuracy = 0.1)
+      ),
+      count_log   = log1p(count),
+      text_colour = if_else(rescale(count_log) < 0.45, "grey10", "white")
+    )
 
-gene_totals <- co_df %>%
-  group_by(gene) %>%
-  summarise(total = sum(count))
-system_totals <- co_df %>%
-  group_by(system) %>%
-  summarise(total = sum(count))
+  class_co_df <- class_co_df %>%
+    filter(count > 0)
 
-gene_levels <- gene_totals %>%
-  arrange(desc(total)) %>%
-  pull(gene)
-system_levels <- system_totals %>%
-  arrange(total) %>%
-  pull(system)
+  # 2.4 Ordering
+  system_levels <- class_co_df %>%
+    group_by(system) %>%
+    summarise(total = sum(count), .groups = "drop") %>%
+    arrange(total) %>%
+    pull(system)
 
-co_df <- co_df %>%
-  mutate(
-    gene   = factor(gene, levels = gene_levels),
-    system = factor(system, levels = system_levels)
+  arg_class_levels <- class_co_df %>%
+    group_by(arg_class) %>%
+    summarise(total = sum(count), .groups = "drop") %>%
+    arrange(desc(total)) %>%
+    pull(arg_class)
+
+  class_co_df <- class_co_df %>%
+    mutate(
+      system    = factor(system, levels = system_levels),
+      arg_class = factor(arg_class, levels = arg_class_levels)
+    )
+
+  # 2.5 PDS annotation (y-axis) - labels coloured by defense mechanism
+  system_annot <- tibble(system = system_levels) %>%
+    left_join(annotations, by = "system") %>%
+    mutate(
+      mechanism_category = replace_na(mechanism_category, "Uncharacterized"),
+      mechanism_category = factor(mechanism_category, levels = mechanism_levels),
+      coloured_label = glue(
+        "<span style='color:{mechanism_colours[as.character(mechanism_category)]}'><b>{system}</b></span>"
+      ),
+      system = factor(system, levels = system_levels)
+    )
+
+  system_label_map <- setNames(system_annot$coloured_label, system_annot$system)
+
+  # 2.6 Dummy data for the mechanism legend
+  legend_df <- tibble(
+    x = arg_class_levels[1],
+    y = system_levels[1],
+    mechanism_category = factor(mechanism_levels, levels = mechanism_levels)
   )
 
-# Build colour palette
-pal <- c("white", colorpanel(10000, "yellow2", "darkcyan", "purple4"))
+  list(
+    amr_class_totals = amr_class_totals,
+    contigs_long     = contigs_long,
+    class_co_df      = class_co_df,
+    system_levels    = system_levels,
+    arg_class_levels = arg_class_levels,
+    system_label_map = system_label_map,
+    legend_df        = legend_df
+  )
+}
+```
 
-# Draw the heatmap with ggplot2
-pB <- ggplot(co_df, aes(x = gene, y = system, fill = count)) +
-  geom_tile(color = "white") +
+```{r}
+plasmid_prep <- prepare_cooccurrence(meta, "Plasmid")
+
+class_co_df      <- plasmid_prep$class_co_df
+system_label_map <- plasmid_prep$system_label_map
+legend_df        <- plasmid_prep$legend_df
+```
+
+```{r}
+chr_prep <- prepare_cooccurrence(meta, "Chromosome")
+
+class_co_df_chr      <- chr_prep$class_co_df
+system_label_map_chr <- chr_prep$system_label_map
+legend_df_chr        <- chr_prep$legend_df
+```
+
+# 3. Plot plasmids (Figure 3A)
+
+```{r}
+pal <- colorpanel(1000, "#F3E79B", "darkcyan", "purple4")
+
+fig_class_heatmap <- ggplot(class_co_df %>% filter(n_plasmids_with_class > 20), aes(x = arg_class, y = system)) +
+  geom_tile(aes(fill = pct), colour = "white", linewidth = 0.5) +
+
   scale_fill_gradientn(
-    colours = pal,
-    name    = "Number of shared plasmids"
+    colours  = pal,
+    name     = "Percentage of plasmids:",
+    labels   = scales::percent_format(accuracy = 1),
+    breaks   = c(0, 0.2, 0.4, 0.6, 0.8),
+    na.value = "white",
+    guide    = guide_colorbar(barwidth = 28, barheight = 1.5)
   ) +
+
+  scale_colour_identity(guide = "none") +
+
+  scale_y_discrete(
+    labels = function(x) unname(system_label_map[as.character(x)]),
+    drop = TRUE
+  ) +
+  scale_x_discrete(drop = TRUE) +
+
+  ggnewscale::new_scale_colour() +
+  geom_point(
+    data = legend_df,
+    aes(x = x, y = y, colour = mechanism_category),
+    inherit.aes = FALSE,
+    alpha = 0,
+    size = 5,
+    show.legend = TRUE
+  ) +
+  scale_colour_manual(
+    values = mechanism_colours,
+    name   = "Defense mechanism:",
+    guide  = guide_legend(
+      override.aes = list(alpha = 1, size = 5, shape = 15),
+      nrow = 2
+    )
+  ) +
+
   labs(
-    x     = "Antibiotic resistance genes",
+    x     = "ARG class",
     y     = "Phage defense systems",
-    title = "A. Co-occurrence on all plasmids\n(ordered by total counts)"
+    title = "A. Percentage of plasmids carrying a given ARG class \n that also carry a given defense system",
+    subtitle = "for classes where >20 plasmids have a given ARG"
   ) +
-  theme_minimal(base_size = 14) +
+  theme_minimal(base_size = 18) +
   theme(
-    plot.title = element_text(size = 16, face = "bold", hjust = 0.5),
-    axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1),
-    axis.text.y = element_text(hjust = 1),
-    axis.title.y = element_text(margin = margin(r = 0), face = "bold"),
-    axis.title.x = element_text(margin = margin(t = 10), face = "bold"),
-    legend.position = "bottom"
+    plot.title        = element_text(size = 32, face = "bold", hjust = 0.5),
+    plot.subtitle = element_text(size=25, vjust = 0.1, hjust = 0.5, margin = margin(b = 20)),
+    axis.text.x       = element_text(
+      angle = 45, vjust = 1, hjust = 1,
+      size = 26, face = "bold"
+    ),
+    axis.text.y       = ggtext::element_markdown(hjust = 1, size = 25),
+    axis.text.y.left  = ggtext::element_markdown(hjust = 1, size = 26),
+    axis.title.x      = element_text(size = 27, face = "bold", margin = margin(t = 13, b = 20)),
+    axis.title.y      = element_text(size = 27, face = "bold"),
+    legend.position   = "bottom",
+    legend.box        = "vertical",
+    legend.spacing.y  = grid::unit(30, "pt"),
+    legend.title      = element_text(size = 25, face = "bold"),
+    legend.text       = element_text(size = 25),
+    panel.grid.major  = element_blank(),
+    legend.box.background = element_rect(colour = "grey60", fill = NA, linewidth = 1),
+    legend.box.margin     = margin(10, 10, 10, 10)
   )
 
-print(pB)
+fig_class_heatmap
 
-# Save the plot to figures directory
 ggsave(
-  filename = here("figures", "cooccurrence_heatmap_plasmids.png"),
-  plot     = pB,
-  width    = 12,
-  height   = 15,
-  units    = "in",
+  filename = "cooccurrence_heatmap_plasmids_fig3A.png",
+  plot     = fig_class_heatmap,
+  path     = fig_dir,
+  width    = 19, height = 18, units = "in",
   dpi      = 300
 )
-
 ```
 
-
-
+# 4. Plot chromosomes (Figure S9)
 
 ```{r}
-# Supplementary Figure S9
+pal <- colorpanel(1000, "#F3E79B", "darkcyan", "purple4")
 
-# Keep only chromosome entries
-chromosomes <- meta %>%
-  filter(Type == "Chromosome")
+fig_class_heatmap_chr <- ggplot(class_co_df_chr %>% filter(n_chromosomes_with_class > 20), aes(x = arg_class, y = system)) +
+  geom_tile(aes(fill = pct), colour = "white", linewidth = 0.5) +
 
-# Split the AMRFinderPlus4 column on commas
-chromosomes_long <- chromosomes %>%
-  mutate(AMRFinderPlus4 = coalesce(AMRFinderPlus4, "")) %>%
-  separate_rows(AMRFinderPlus4, sep = ",") %>%
-  mutate(AMRFinderPlus4 = str_trim(AMRFinderPlus4)) %>%
-  filter(AMRFinderPlus4 != "", !is.na(type))
-
-# Build the co-occurrence matrix (ARG × PDS)
-co_mat <- table(chromosomes_long$AMRFinderPlus4, chromosomes_long$type)
-
-# Remove genes/systems that never co-occur
-co_mat <- co_mat[rowSums(co_mat) > 0, colSums(co_mat) > 0]
-
-# Convert to long format and compute totals
-co_df <- as.data.frame(as.table(co_mat), stringsAsFactors = FALSE)
-colnames(co_df) <- c("gene", "system", "count")
-
-gene_totals <- co_df %>%
-  group_by(gene) %>%
-  summarise(total = sum(count))
-system_totals <- co_df %>%
-  group_by(system) %>%
-  summarise(total = sum(count))
-
-gene_levels <- gene_totals %>%
-  arrange(desc(total)) %>%
-  pull(gene)
-system_levels <- system_totals %>%
-  arrange(total) %>%
-  pull(system)
-
-co_df <- co_df %>%
-  mutate(
-    gene   = factor(gene, levels = gene_levels),
-    system = factor(system, levels = system_levels)
-  )
-
-# Build colour palette
-pal <- c("white", colorpanel(10000, "yellow2", "darkcyan", "purple4"))
-
-# Draw the heatmap with ggplot2
-p <- ggplot(co_df, aes(x = gene, y = system, fill = count)) +
-  geom_tile(color = "white") +
   scale_fill_gradientn(
-    colours = pal,
-    name    = "Number of shared chromosomes"
+    colours  = pal,
+    name     = "Percentage of chromosomes:",
+    labels   = scales::percent_format(accuracy = 1),
+    breaks   = c(0, 0.2, 0.4, 0.6, 0.8),
+    na.value = "white",
+    guide    = guide_colorbar(barwidth = 28, barheight = 1.5)
   ) +
+
+  scale_colour_identity(guide = "none") +
+
+  scale_y_discrete(
+    labels = function(x) unname(system_label_map_chr[as.character(x)]),
+    drop = TRUE
+  ) +
+  scale_x_discrete(drop = TRUE) +
+
+  ggnewscale::new_scale_colour() +
+  geom_point(
+    data = legend_df_chr,
+    aes(x = x, y = y, colour = mechanism_category),
+    inherit.aes = FALSE,
+    alpha = 0,
+    size = 5,
+    show.legend = TRUE
+  ) +
+  scale_colour_manual(
+    values = mechanism_colours,
+    name   = "Defense mechanism:",
+    guide  = guide_legend(
+      override.aes = list(alpha = 1, size = 5, shape = 15),
+      nrow = 2
+    )
+  ) +
+
   labs(
-    x     = "Antibiotic resistance genes",
-    y     = "Phage defence systems",
-    title = "Co-occurrence on all chromosomes\n(ordered by total counts)"
+    x     = "ARG class",
+    y     = "Phage defense systems",
+    title = "Percentage of chromosomes carrying a given ARG class \n that also carry a given defense system",
+    subtitle = "for classes where >20 chromosomes have a given ARG"
   ) +
-  theme_minimal() +
+  theme_minimal(base_size = 18) +
   theme(
-    plot.title    = element_text(hjust = 0.5),
-    axis.text.x   = element_text(angle = 90, vjust = 0.5, hjust = 1),
-    axis.text.y   = element_text(hjust = 1),
-    axis.title.y  = element_text(margin = margin(r = 10)),
-    axis.title.x  = element_text(margin = margin(t = 10))
+    plot.title        = element_text(size = 32, face = "bold", hjust = 0.5),
+    plot.subtitle = element_text(size=25, vjust = 0.1, hjust = 0.5, margin = margin(b = 20)),
+    axis.text.x       = element_text(
+      angle = 45, vjust = 1, hjust = 1,
+      size = 26, face = "bold"
+    ),
+    axis.text.y       = ggtext::element_markdown(hjust = 1, size = 25),
+    axis.text.y.left  = ggtext::element_markdown(hjust = 1, size = 26),
+    axis.title.x      = element_text(size = 27, face = "bold", margin = margin(t = 13, b = 20)),
+    axis.title.y      = element_text(size = 27, face = "bold"),
+    legend.position   = "bottom",
+    legend.box        = "vertical",
+    legend.spacing.y  = grid::unit(30, "pt"),
+    legend.title      = element_text(size = 25, face = "bold"),
+    legend.text       = element_text(size = 25),
+    panel.grid.major  = element_blank(),
+    legend.box.background = element_rect(colour = "grey60", fill = NA, linewidth = 1),
+    legend.box.margin     = margin(10, 10, 10, 10)
   )
 
-print(p)
+fig_class_heatmap_chr
 
-# Save the plot to figures directory
 ggsave(
-  filename = here("figures", "cooccurrence_heatmap_chromosomes.png"),
-  plot     = p,
-  width    = 12,
-  height   = 15,
-  units    = "in",
+  filename = "cooccurrence_heatmap_chromosomesS9.png",
+  plot     = fig_class_heatmap_chr,
+  path     = fig_dir,
+  width    = 19, height = 40, units = "in",
   dpi      = 300
 )
 ```
 
-# Session Information
+
+# Session info
 
 ```{r session-info}
 sessionInfo()
