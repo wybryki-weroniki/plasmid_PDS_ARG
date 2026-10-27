@@ -395,8 +395,16 @@ supp_table <- obs_counts %>%
   arrange(plasmid_p, chromosome_p)
 
 
-## Printing first 10 rows
-print(supp_table, n = nrow(.))
+## Save and check the table
+write_csv(supp_table, file.path(fig_dir, "Supplementary_File_1.csv")) 
+
+supp_table %>% 
+summarise( 
+plasmid_BH = sum(plasmid_q_BH < fdr_cutoff), 
+plasmid_BY = sum(plasmid_q_BY < fdr_cutoff), 
+chromosome_BH = sum(chromosome_q_BH < fdr_cutoff), 
+chromosome_BY = sum(chromosome_q_BY < fdr_cutoff) )
+
 ```
 
 # Session Information
