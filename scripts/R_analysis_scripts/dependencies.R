@@ -23,6 +23,7 @@ required_packages <- c(
   "ggrepel",
   "ggtext",
   "scales",
+  "glue",
 
   # Statistical modeling
   "mgcv",
