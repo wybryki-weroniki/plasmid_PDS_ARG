@@ -11,16 +11,10 @@ knitr::opts_chunk$set(echo = TRUE)
 # Load packages
 
 library(tidyverse)
-library(ggrepel)
 library(progress)
 library(patchwork)
-library(dplyr)
-library(readr)
-library(tibble)
-library(rlang)
-library(ggplot2)
-library(ggrepel)
-library(forcats)
+library(ggtext)
+library(glue)
 library(here)
 
 # Load utility functions
@@ -29,33 +23,49 @@ source(here("scripts", "R_analysis_scripts", "utils.R"))
 
 
 ```{r}
-#  Permutation test for plasmid enrichment per defense-system family
-#  – keeps each isolate’s plasmid/chromosome balance fixed
-
-
-## Prepare inputs
+fig_dir <- here("figures")
+ensure_dir(fig_dir)
 
 genome_id_col <- "Isolate" # column that groups contigs into genomes
 n_perm <- 10000 # number of permutations
+fdr_cutoff <- 0.025
 set.seed(42) # reproducibility
+```
+
+```{r palette}
+# Okabe-Ito based colour-blind friendly palette, used by both figures
+mechanism_colours <- c(
+  "Abi/Cell Death"          = "#D55E00",
+  "Nucleic Acid Targeting"    = "#0072B2",
+  "Other/Mixed"             = "#009E73",
+  "DNA/RNA Modification"    = "#F0E442",
+  "Uncharacterized"           = "#999999"
+)
+
+mechanism_levels <- names(mechanism_colours)
+```
+
+# 1. Permutation test
 
 
-## Read and pre-process the metadata
+```{r prepare-data}
+
 df <- read_metadata("metadata_updated_ecoli_systems_detail.csv") %>%
-  filter(!is.na(type)) %>% # keep rows with a defence system
+  filter(!is.na(type)) %>% # keep rows with a defense system
   mutate(
     Type   = tolower(Type), # 'plasmid' / 'chromosome'
     Genome = .data[[genome_id_col]] # explicit genome column
   )
 
+annotations <- read_metadata("classification_final.csv") %>% 
+select(system, mechanism_category, mechanism_subcategory)
 
-## Collapse to one record per Contig x system family
+# Collapse to one record per Contig x system family
 by_contig <- df %>%
   select(Genome, Contig, Type, type) %>%
-  distinct() # remove multiple hits per contig
+  distinct()
 
-
-## Observed counts per family
+# Observed counts per family
 obs_counts <- by_contig %>%
   group_by(type) %>%
   summarise(
@@ -65,14 +75,13 @@ obs_counts <- by_contig %>%
   )
 
 families <- obs_counts$type
-n_fam <- length(families)
-obs_plasmid <- obs_counts$n_plasmid
-names(obs_plasmid) <- families
+pi_bar   <- mean(by_contig$Type == "plasmid")   # overall plasmid share
+```
 
-
-## Permutation matrix
-perm_matrix <- matrix(0L,
-  nrow = n_fam, ncol = n_perm,
+```{r permutation}
+perm_matrix <- matrix(
+  0L,
+  nrow = length(families), ncol = n_perm,
   dimnames = list(families, NULL)
 )
 
@@ -82,259 +91,219 @@ pb <- progress_bar$new(
 )
 
 for (i in seq_len(n_perm)) {
-  ### Shuffle plasmid/chromosome labels within each isolate
   permuted <- by_contig %>%
     group_by(Genome) %>%
     mutate(Type_perm = sample(Type, size = n(), replace = FALSE)) %>%
     ungroup()
 
-  ### Count plasmid-labelled contigs per family in the permuted data
   perm_counts <- permuted %>%
     group_by(type) %>%
     summarise(n_plasmid = sum(Type_perm == "plasmid"), .groups = "drop")
 
   perm_matrix[perm_counts$type, i] <- perm_counts$n_plasmid
-
   pb$tick()
 }
 
-
-## Overall plasmid share for future reference
-pi_bar <- mean(by_contig$Type == "plasmid") # overall plasmid share
+# Make sure perm_matrix row order matches obs_counts row order
+perm_matrix <- perm_matrix[families, , drop = FALSE]
 ```
 
+# 2. Helper functions
 
-```{r}
-# Figure 2
-## Plasmid‑enriched defense systems – BH vs. BY in one plot
+All shared logic lives here so the two figures (and the supplementary table) call
+the same code paths.
 
+```{r helpers}
+# 2a. Compute enrichment results for one direction
+# direction = "plasmid"  -> p_over: P(perm >= obs)
+# direction = "chromosome" -> p_under: P(perm <= obs)
+compute_enrichment <- function(obs_counts, perm_matrix, pi_bar,
+                               direction = c("plasmid", "chromosome"),
+                               fdr_cutoff = 0.025) {
+  direction <- match.arg(direction)
 
-### Compute permutation p‑values and both FDR corrections
-p_over <- (rowSums(perm_matrix >= obs_counts$n_plasmid) + 1) / (n_perm + 1)
-q_over_BH <- p.adjust(p_over, method = "BH")
-q_over_BY <- p.adjust(p_over, method = "BY")
+  if (direction == "plasmid") {
+    p_val <- (rowSums(perm_matrix >= obs_counts$n_plasmid) + 1) / (ncol(perm_matrix) + 1)
+  } else {
+    p_val <- (rowSums(perm_matrix <= obs_counts$n_plasmid) + 1) / (ncol(perm_matrix) + 1)
+  }
+  q_BH <- p.adjust(p_val, method = "BH")
 
-results_plas <- obs_counts %>%
-  mutate(
-    p_over = p_over[type],
-    q_over_BH = q_over_BH[type],
-    q_over_BY = q_over_BY[type],
-    obs_prop = n_plasmid / n_total,
-    expected_plas = n_total * pi_bar,
-    diff = n_plasmid - expected_plas,
-    sig_BH = q_over_BH < 0.025,
-    sig_BY = q_over_BY < 0.025,
-    sig_cat = case_when(
-      sig_BY ~ "BY & BH",
-      sig_BH ~ "BH only",
-      TRUE ~ "NS"
+  out <- obs_counts %>%
+    mutate(
+      p_val     = p_val[type],
+      q_BH      = q_BH[type],
+      sig_BH    = q_BH < fdr_cutoff
     )
-  )
 
-### Proportion on plasmids
+  if (direction == "plasmid") {
+    out <- out %>%
+      mutate(
+        obs_prop     = n_plasmid / n_total,
+        expected     = n_total * pi_bar,
+        diff         = n_plasmid - expected
+      )
+  } else {
+    out <- out %>%
+      mutate(
+        n_chr        = n_total - n_plasmid,
+        obs_prop     = n_chr / n_total,
+        expected     = n_total * (1 - pi_bar),
+        diff         = n_chr - expected
+      )
+  }
+  out
+}
 
-plas_tbl <- results_plas %>% filter(sig_BH)
-
-plot_prop_plas <- ggplot(
-  plas_tbl,
-  aes(
-    x = obs_prop,
-    y = fct_reorder(type, obs_prop),
-    colour = sig_cat,
-    shape = sig_cat
-  )
-) +
-  geom_vline(xintercept = pi_bar, linetype = "dashed", linewidth = 0.4) +
-  geom_point(size = 3) +
-  geom_text_repel(
-    aes(label = sprintf("BH=%.2g\nBY=%.2g", q_over_BH, q_over_BY)),
-    nudge_y = -0.30,
-    nudge_x = 0.02,
-    direction = "y",
-    vjust = 1,
-    segment.size = 0.25,
-    min.segment.length = 0,
-    max.overlaps = Inf,
-    size = 3,
-    show.legend = FALSE
-  ) +
-  scale_colour_manual(values = c(
-    "BH only" = "grey50",
-    "BY & BH" = "steelblue"
-  )) +
-  scale_shape_manual(values = c(
-    "BH only" = 1,
-    "BY & BH" = 16
-  )) +
-  labs(
-    title = "A. Plasmid-enriched defense systems",
-    subtitle = "BH-significant families shown; filled points also pass BY (FDR < 0.025)",
-    x = "Proportion of occurrences on plasmids",
-    y = NULL,
-    colour = "Significant at",
-    shape = "Significant at"
-  ) +
-  theme_bw(base_size = 13) +
-  theme(
-    panel.grid.major.y = element_blank(),
-    legend.position = "right"
-  )
-
-print(plot_prop_plas)
-
-### Excess plasmid counts
-plot_diff_plas <- ggplot(
-  plas_tbl,
-  aes(
-    x = diff,
-    y = fct_reorder(type, diff),
-    fill = sig_cat
-  )
-) +
-  geom_vline(xintercept = 0, linewidth = 0.4) +
-  geom_col(width = 0.7) +
-  scale_fill_manual(values = c(
-    "BH only" = "grey70",
-    "BY & BH" = "steelblue"
-  )) +
-  labs(
-    title = "B. Excess plasmid occurrences (observed − expected)",
-    subtitle = "Fill colour encodes significance (BY & BH vs. BH only)",
-    x = "Excess plasmid count",
-    y = NULL,
-    fill = "Significant at"
-  ) +
-  theme_bw(base_size = 13) +
-  theme(
-    panel.grid.major.y = element_blank(),
-    legend.position = "right"
-  )
-
-print(plot_diff_plas)
-
-### Arrange plots side‑by‑side
-combined_plots <- plot_prop_plas + plot_diff_plas +
-  plot_layout(ncol = 2, guides = "collect")
-print(combined_plots)
-```
-
-
-```{r}
-# Supplementary Figure S6
-## Chromosome‑enriched defense systems – BH vs. BY in one plot
-
-### Compute permutation p‑values and both FDR corrections
-p_under <- (rowSums(perm_matrix <= obs_counts$n_plasmid) + 1) / (n_perm + 1)
-q_under_BH <- p.adjust(p_under, method = "BH")
-q_under_BY <- p.adjust(p_under, method = "BY")
-
-results_chr <- obs_counts %>%
-  mutate(
-    p_under = p_under[type],
-    q_under_BH = q_under_BH[type],
-    q_under_BY = q_under_BY[type],
-    obs_chr_prop = (n_total - n_plasmid) / n_total,
-    expected_chr = n_total * (1 - pi_bar),
-    diff_chr = (n_total - n_plasmid) - expected_chr,
-    sig_BH = q_under_BH < 0.025,
-    sig_BY = q_under_BY < 0.025,
-    sig_cat = case_when(
-      sig_BY ~ "BY & BH",
-      sig_BH ~ "BH only",
-      TRUE ~ "NS"
+# 2b. Add mechanism annotations + coloured y-axis labels
+annotate_results <- function(results, annotations, mechanism_colours,
+                             mechanism_levels) {
+  results %>%
+    left_join(annotations, by = c("type" = "system")) %>%
+    mutate(
+      mechanism_category = replace_na(mechanism_category, "Uncharacterized"),
+      mechanism_category = factor(mechanism_category, levels = mechanism_levels),
+      coloured_label = glue(
+        "<span style='color:{mechanism_colours[as.character(mechanism_category)]}'>",
+        "<b>{type}</b></span>"
+      )
     )
-  )
+}
 
-### Proportion on chromosomes
-chr_tbl <- results_chr %>% filter(sig_BH)
+# 2c. Shared theme
+theme_enrichment <- function(base_size = 12) {
+  theme_bw(base_size = base_size) +
+    theme(
+      panel.grid.major.y   = element_blank(),
+      panel.grid.minor     = element_blank(),
+      plot.title           = element_text(size = 13, face = "bold"),
+      plot.subtitle        = element_text(size = 10, colour = "grey40"),
+      axis.text.y          = element_markdown(size = 10),
+      legend.title         = element_text(size = 10, face = "bold"),
+      legend.text          = element_text(size = 9),
+      legend.position      = "bottom",
+      legend.justification = "center"
+    )
+}
 
-plot_prop_chr <- ggplot(
-  chr_tbl,
-  aes(
-    x = obs_chr_prop,
-    y = fct_reorder(type, obs_chr_prop),
-    colour = sig_cat,
-    shape = sig_cat
-  )
-) +
-  geom_vline(xintercept = 1 - pi_bar, linetype = "dashed") +
-  geom_point(size = 3) +
-  geom_text_repel(
-    aes(label = sprintf("BH=%.2g\nBY=%.2g", q_under_BH, q_under_BY)),
-    nudge_y = -0.30,
-    nudge_x = 0.02,
-    direction = "y",
-    vjust = 1,
-    segment.size = 0.25,
-    min.segment.length = 0,
-    max.overlaps = Inf,
-    size = 3,
-    show.legend = FALSE
-  ) +
-  scale_colour_manual(values = c(
-    "BH only" = "grey50",
-    "BY & BH" = "firebrick"
-  )) +
-  scale_shape_manual(values = c(
-    "BH only" = 1,
-    "BY & BH" = 16
-  )) +
-  labs(
-    title = "Chromosome‑enriched defense systems",
-    subtitle = "BH‑significant families shown; filled points also pass BY (FDR < 0.025)",
-    x = "Proportion of occurrences on chromosomes",
-    y = NULL,
-    colour = "Significant at",
-    shape = "Significant at"
-  ) +
-  theme_bw(base_size = 16) +
-  theme(
-    panel.grid.major.y = element_blank(),
-    legend.position = "right"
-  )
+# 2d. Panel A: proportion dot plot
+plot_proportion <- function(tbl, vline_x, title, subtitle, x_lab,
+                            mechanism_colours) {
+  ggplot(tbl, aes(x = obs_prop,
+                  y = fct_reorder(coloured_label, obs_prop),
+                  colour = mechanism_category)) +
+    geom_vline(xintercept = vline_x, linetype = "dashed",
+               linewidth = 0.4, colour = "grey40") +
+    geom_point(size = 3, show.legend = TRUE) +
+    scale_colour_manual(values = mechanism_colours,
+                        name   = "Defense mechanism", drop = FALSE) +
+    labs(title = title, subtitle = subtitle, x = x_lab, y = NULL) +
+    theme_enrichment() +
+    guides(colour = guide_legend(nrow = 2, override.aes = list(size = 4)))
+}
 
-print(plot_prop_chr)
+# 2e. Panel B: excess count bar plot
+plot_excess <- function(tbl, title, subtitle, x_lab, mechanism_colours) {
+  ggplot(tbl, aes(x = diff,
+                  y = fct_reorder(coloured_label, diff),
+                  fill = mechanism_category)) +
+    geom_vline(xintercept = 0, linewidth = 0.4) +
+    geom_col(width = 0.7, show.legend = FALSE) +
+    scale_fill_manual(values = mechanism_colours,
+                      name   = "Defense mechanism", drop = FALSE) +
+    labs(title = title, subtitle = subtitle, x = x_lab, y = NULL) +
+    theme_enrichment() +
+    theme(legend.position = "none")
+}
 
-### Excess chromosome counts
-plot_diff_chr <- ggplot(
-  chr_tbl,
-  aes(
-    x = diff_chr,
-    y = fct_reorder(type, diff_chr),
-    fill = sig_cat
-  )
-) +
-  geom_vline(xintercept = 0) +
-  geom_col(width = 0.7) +
-  scale_fill_manual(values = c(
-    "BH only" = "grey70",
-    "BY & BH" = "firebrick"
-  )) +
-  labs(
-    title = "Excess chromosome occurrences (observed − expected)",
-    subtitle = "Fill colour encodes significance (BY & BH vs. BH only)",
-    x = "Excess chromosome count",
-    y = NULL,
-    fill = "Significant at"
-  ) +
-  theme_bw(base_size = 16) +
-  theme(
-    panel.grid.major.y = element_blank(),
-    legend.position = "right"
-  )
-
-print(plot_diff_chr)
-
-
-### Arrange plots side‑by‑side
-combined_plots <- plot_prop_chr + plot_diff_chr +
-  plot_layout(ncol = 2, guides = "collect")
-print(combined_plots)
+# 2f. Combine the two panels with one shared legend
+# NB: uses plot_layout(guides = "collect") only. Avoids the `&.gg` /
+# `&.patchwork` operator which fails on some ggplot2/patchwork combinations
+# (Error: Can't find method for generic `&(e1, e2)`).
+combine_panels <- function(p_left, p_right) {
+  (p_left + p_right) +
+    plot_layout(ncol = 2, guides = "collect") +
+    plot_annotation(theme = theme(legend.position = "bottom"))
+}
 ```
 
 
+# 3. Figure 2 - Plasmid-enriched defense systems
+
+```{r figure-2, fig.width = 12, fig.height = 8}
+results_plas <- compute_enrichment(
+  obs_counts, perm_matrix, pi_bar,
+  direction = "plasmid", fdr_cutoff = fdr_cutoff
+)
+
+plas_tbl <- results_plas %>%
+  filter(sig_BH) %>%
+  annotate_results(annotations, mechanism_colours, mechanism_levels)
+
+plot_prop_plas <- plot_proportion(
+  plas_tbl,
+  vline_x  = pi_bar,
+  title    = "A. Plasmid-enriched defense systems",
+  subtitle = sprintf("BH-significant families (FDR < %g)", fdr_cutoff),
+  x_lab    = "Proportion of occurrences on plasmids",
+  mechanism_colours = mechanism_colours
+)
+
+plot_diff_plas <- plot_excess(
+  plas_tbl,
+  title    = "B. Excess plasmid occurrences (observed − expected)",
+  subtitle = "BH-significant families only",
+  x_lab    = "Excess plasmid count",
+  mechanism_colours = mechanism_colours
+)
+
+fig2 <- combine_panels(plot_prop_plas, plot_diff_plas)
+fig2
+
+ggsave(file.path(fig_dir, "fig2_plasmid_enriched_annotated2.png"),
+       fig2, width = 12, height = 8, units = "in", dpi = 300)
+
+```
+# 4. Supplementary Figure S6 — Chromosome-enriched defense systems
+
+```{r figure-s6, fig.width = 12, fig.height = 8}
+results_chr <- compute_enrichment(
+  obs_counts, perm_matrix, pi_bar,
+  direction = "chromosome", fdr_cutoff = fdr_cutoff
+)
+
+chr_tbl <- results_chr %>%
+  filter(sig_BH) %>%
+  annotate_results(annotations, mechanism_colours, mechanism_levels)
+
+plot_prop_chr <- plot_proportion(
+  chr_tbl,
+  vline_x  = 1 - pi_bar,
+  title    = "A. Chromosome-enriched defense systems",
+  subtitle = sprintf("BH-significant families (FDR < %g)", fdr_cutoff),
+  x_lab    = "Proportion of occurrences on chromosomes",
+  mechanism_colours = mechanism_colours
+)
+
+plot_diff_chr <- plot_excess(
+  chr_tbl,
+  title    = "B. Excess chromosome occurrences (observed − expected)",
+  subtitle = "BH-significant families only",
+  x_lab    = "Excess chromosome count",
+  mechanism_colours = mechanism_colours
+)
+
+figS6 <- combine_panels(plot_prop_chr, plot_diff_chr)
+figS6
+
+ggsave(file.path(fig_dir, "figS6_chromosome_enriched_annotated2.png"),
+       figS6, width = 14, height = 10, units = "in", dpi = 400)
+```
+
+# 5. Supplementary File 1: Permutation test summary per defense-system family
+
 ```{r}
-# Supplementary File 1: Permutation test summary per defense-system family
+
 
 ## Ensuring row order in perm_matrix matches obs_counts
 families <- obs_counts$type
