@@ -217,7 +217,7 @@ pA <- plasmids %>%
 
 # Panel B
 pB <- plasmids %>%
-  filter(Pathotype == "Environmental") %>%
+  filter(Pathotype == "Environmental", Length_bp <= 1000000) %>%
   ggplot(aes(Length_bp, fill = Category)) +
   geom_histogram(
     binwidth = bin_w_stacked,
