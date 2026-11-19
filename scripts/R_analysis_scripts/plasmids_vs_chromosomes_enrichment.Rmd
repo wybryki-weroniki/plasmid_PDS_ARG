@@ -60,9 +60,9 @@ stars2 <- star(chi_1_3$p.value)
 #  build dataframe
 plot_df <- data.frame(
   label = c(
-    "A. Total gene count",
-    "B. Defense systems gene count",
-    "C. ARG count"
+    "Total gene count",
+    "Defense systems gene count",
+    "ARG count"
   ),
   proportion = c(
     prop_genes_plasmid,
@@ -76,6 +76,11 @@ plot_df <- data.frame(
   ),
   stringsAsFactors = FALSE
 )
+
+plot_df$label <- factor(plot_df$label,
+                        levels = c("Total gene count",
+                                   "Defense systems gene count",
+                                   "ARG count"))
 
 # format sample‐size for labeling
 plot_df$sample_label <- formatC(plot_df$sample_size, format = "d", big.mark = ",")
@@ -114,14 +119,16 @@ p <- ggplot(plot_df, aes(x = label, y = proportion)) +
   # significance brackets & stars
   geom_signif(
     comparisons = list(
-      c("A. Total gene count", "B. Defense systems gene count"),
-      c("A. Total gene count", "C. ARG count")
+      c("Total gene count", "Defense systems gene count"),
+      c("Total gene count", "ARG count")
     ),
     annotations = c(stars1, stars2),
     y_position = y_pos,
     tip_length = 0.02,
     textsize = 4
   ) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.05))) +
+  scale_x_discrete(labels = function(x) paste0("\n", x)) +
 
   # title with italic “E. coli”
   labs(
@@ -134,8 +141,13 @@ p <- ggplot(plot_df, aes(x = label, y = proportion)) +
   ) +
   theme_minimal() +
   theme(
-    axis.text.x = element_text(size = 12, vjust = 0.5),
-    plot.title  = element_text(hjust = 0.5, size = 14)
+    axis.text.x = element_text(size = 13, vjust = 0.5),
+    axis.text.y = element_text(size = 12),
+    axis.title.y = element_text(size = 14),
+    plot.title  = element_text(hjust = 0.5, size = 14),
+    panel.grid  = element_blank(),
+    axis.line.x = element_line(colour = "black"),
+    axis.line.y = element_line(colour = "black")
   )
 
 print(p)
