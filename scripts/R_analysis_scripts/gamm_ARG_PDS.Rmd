@@ -91,11 +91,12 @@ gamm_model <- gam(
   AMR_count ~
     systems_count +
     GC_centered + # centred GC predictor
-    offset(log10(`Length..bp.`)) +
+    offset(log(`Length..bp.`)) +
     Niche + # reference = "Livestock-associated"
     s(Abricate.PlasmidFinder, bs = "re"),
   family = tw(link = "log"),
-  data = metadata_sampled_clusters
+  data = metadata_sampled_clusters,
+  method = "REML"
 )
 
 # Model inspection
